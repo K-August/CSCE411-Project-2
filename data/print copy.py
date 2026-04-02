@@ -1,9 +1,9 @@
 import pickle
 
-with open("spherical-gm2", "rb") as f:
+with open("genetic-gm", "rb") as f:
     matrices = pickle.load(f)
 
-with open("spherical-mh2", "rb") as f:
+with open("genetic-mh", "rb") as f:
     mHeights = pickle.load(f)
 
 for key, matrix in matrices.items():
