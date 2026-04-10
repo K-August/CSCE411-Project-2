@@ -4,7 +4,6 @@ import numpy as np
 import random
 import os
 import fast_evaluator
-from concurrent.futures import ProcessPoolExecutor
 
 # Keep your global cache in Python for maximum speed
 mheight_cache = {}
@@ -12,15 +11,6 @@ mheight_cache = {}
 def clear_cache():
     global mheight_cache
     mheight_cache = {}
-
-# ==========================================
-# NEW: Top-level worker for Multiprocessing
-# ==========================================
-def eval_worker(args):
-    # This must be at the top level so the ProcessPoolExecutor can pickle it
-    import fast_evaluator
-    n, k, m, mat, threshold = args
-    return fast_evaluator.calc_mHeight_efficient(n, k, m, mat, threshold)
 
 def get_cached_mHeight(n, k, m, P, threshold=0.95):
     cache_key = (n, k, m, tuple(P.flatten()))
@@ -32,7 +22,7 @@ def get_cached_mHeight(n, k, m, P, threshold=0.95):
     return height
 
 # ==========================================
-# NEW: Hypersphere Initialization
+# Hypersphere Initialization
 # ==========================================
 def generate_hypersphere_matrix(k, cols, radius_min=2, radius_max=8):
     # Generate normal Gaussian floats (naturally spherically symmetric)
@@ -50,6 +40,7 @@ def generate_hypersphere_matrix(k, cols, radius_min=2, radius_max=8):
     return np.round(unit_sphere_vectors * radius).astype(int)
 
 # On the Height Profile of Analog Error-Correcting Codes
+# On the Height Profile of Analog Error-Correcting Codes
 def genetic_search(n, k, m, target_height, current_best_matrix=None, starters=100, track=10, generations=50, perturbations=20): 
     cols = n - k
     proxy_m = m
@@ -63,7 +54,15 @@ def genetic_search(n, k, m, target_height, current_best_matrix=None, starters=10
     # 1. Generate starting matrices using the Hypersphere method
     for _ in range(starters - 1):
         G = generate_hypersphere_matrix(k, cols, radius_min=2, radius_max=9)
+        
+        # --- ENFORCE BANS ON STARTING MATRICES ---
+        if (n, k, m) == (9, 6, 3):
+            G = np.clip(G, -3, 3)
             
+        if (n, k, m) in [(9, 4, 4), (9, 6, 3)]:
+            G[G == 0] = random.choice([-1, 1])
+        # -----------------------------------------
+
         if np.any(np.sum(np.abs(G), axis=0) == 0):
             continue
             
@@ -90,6 +89,19 @@ def genetic_search(n, k, m, target_height, current_best_matrix=None, starters=10
     for gen in range(generations):  
         Snew = []
         
+        # --- UNIVERSAL BREATHING BOUNDS ---
+        # 1. Set the baseline and peak ranges based on the matrix type
+        if (n, k, m) == (9, 6, 3):
+            base_clamp = 3
+            peak_clamp = 6 # Breathes up to 6 to jump walls, then squeezes back to 3
+        else:
+            base_clamp = 8
+            peak_clamp = 15 # Normal matrices breathe up to 15
+            
+        # 2. Calculate the sine wave (completes one full breath every 100 generations)
+        cycle = (gen % 100) / 100.0 
+        dynamic_clamp = int(base_clamp + (peak_clamp - base_clamp) * math.sin(cycle * math.pi))
+        
         # --- Crossover Phase ---
         crossover_count = perturbations // 2
         for _ in range(crossover_count):
@@ -110,6 +122,18 @@ def genetic_search(n, k, m, target_height, current_best_matrix=None, starters=10
         threshold = 0.935
         for _ in range(perturbations):
             G = random.choice(S).copy()
+            
+            # --- UNIVERSAL MACRO-MUTATION (5% Chance) ---
+            # Randomly scramble the matrix geometry without changing its overall magnitude
+            if random.random() < 0.05:
+                mutation_type = random.choice(["flip_col", "swap_col"])
+                if mutation_type == "flip_col":
+                    c = random.randint(0, cols - 1)
+                    G[:, c] *= -1 # Invert a column's signs
+                elif mutation_type == "swap_col":
+                    c1, c2 = random.sample(range(cols), 2)
+                    G[:, [c1, c2]] = G[:, [c2, c1]] # Swap two columns
+            
             current_height = get_cached_mHeight(n, k, proxy_m, G, threshold)
             
             P = np.zeros((k, cols), dtype=int)
@@ -117,13 +141,18 @@ def genetic_search(n, k, m, target_height, current_best_matrix=None, starters=10
             col = random.randint(0, cols - 1)
             P[row, col] = random.choice([-1, 1]) 
             
-            # NEW: Catastrophic Mutation (10% chance to jump big)
+            # Catastrophic Jump Size
             if random.random() > 0.1:
                 sigma = 1
             else:
                 sigma = random.choice([2, 3, 4]) 
                 
-            Gnew = np.clip(G + sigma * P, -15, 15)
+            # Apply the Universal Breathing Clamp!
+            Gnew = np.clip(G + sigma * P, -dynamic_clamp, dynamic_clamp) 
+                
+            # Keep the mathematically required Zero-Bans
+            if (n, k, m) in [(9, 4, 4), (9, 6, 3)]:
+                Gnew[Gnew == 0] = random.choice([-1, 1])
             
             if np.any(np.sum(np.abs(Gnew), axis=0) == 0):
                 continue
@@ -140,22 +169,29 @@ def genetic_search(n, k, m, target_height, current_best_matrix=None, starters=10
                 G = Gnew.copy()
                 current_height = new_height
                 
-                Gnew = np.clip(G + sigma * P, -15, 15)
+                # Apply the Universal Breathing Clamp inside the slide too!
+                Gnew = np.clip(G + sigma * P, -dynamic_clamp, dynamic_clamp)
+                    
+                if (n, k, m) in [(9, 4, 4), (9, 6, 3)]:
+                    Gnew[Gnew == 0] = random.choice([-1, 1])
+
                 if np.any(np.sum(np.abs(Gnew), axis=0) == 0):
                     break
                 new_height = get_cached_mHeight(n, k, proxy_m, Gnew, threshold)
 
-        # --- NEW: Diversity Injector (Fresh Blood) ---
+        # --- Diversity Injector (Fresh Blood) ---
         fresh_blood_count = track // 10
         for _ in range(fresh_blood_count):
-            fresh_G = generate_hypersphere_matrix(k, cols, radius_min=2, radius_max=15)
+            # Let the fresh blood respect the current breathing state!
+            fresh_G = generate_hypersphere_matrix(k, cols, radius_min=2, radius_max=max(3, dynamic_clamp))
+            if (n, k, m) in [(9, 4, 4), (9, 6, 3)]:
+                fresh_G[fresh_G == 0] = random.choice([-1, 1])
             if not np.any(np.sum(np.abs(fresh_G), axis=0) == 0):
                 Snew.append(fresh_G)
 
-        # --- NEW: Multiprocessing Evaluation ---
+        # --- SINGLE-THREADED EVALUATION ---
         combined = S + Snew
         
-        # Deduplicate to save evaluating identical matrices
         unique_combined = []
         seen = set()
         for mat in combined:
@@ -165,31 +201,16 @@ def genetic_search(n, k, m, target_height, current_best_matrix=None, starters=10
                 unique_combined.append(mat)
                 
         scored = []
-        to_evaluate = []
-        
         for mat in unique_combined:
-            cache_key = (n, k, proxy_m, tuple(mat.flatten()))
-            if cache_key in mheight_cache:
-                scored.append((mat, mheight_cache[cache_key]))
-            else:
-                to_evaluate.append((n, k, proxy_m, mat, threshold))
-                
-        # Evaluate all unseen matrices in parallel across CPU cores
-        if to_evaluate:
-            with ProcessPoolExecutor() as executor:
-                results = executor.map(eval_worker, to_evaluate)
-                for args, h in zip(to_evaluate, results):
-                    mat = args[3]
-                    cache_key = (n, k, proxy_m, tuple(mat.flatten()))
-                    mheight_cache[cache_key] = h # Update local cache
-                    scored.append((mat, h))
+            h = get_cached_mHeight(n, k, proxy_m, mat, threshold)
+            scored.append((mat, h))
             
         scored.sort(key=lambda x: x[1])
         S = [item[0] for item in scored[:track]]
         
         if scored[0][1] < best_proxy_height:
             best_proxy_height = scored[0][1]
-            print(f"Gen {gen}: height pushed down to {best_proxy_height:.4f}")
+            print(f"Gen {gen} [Clamp: \u00b1{dynamic_clamp}]: height pushed down to {best_proxy_height:.4f}")
 
     best_G = S[0]
     final_target_height = get_cached_mHeight(n, k, m, best_G, threshold)
@@ -207,8 +228,8 @@ if __name__ == '__main__':
 
     focus_parameters = [
         (9,4,4),
-        (9,4,5),
-        (9,5,2),
+        # (9,4,5),
+        # (9,5,2),
         (9,5,3),
         (9,5,4),
         (9,6,2),
@@ -221,9 +242,9 @@ if __name__ == '__main__':
     os.makedirs('data', exist_ok=True)
 
     try:
-        with open('data/spherical-gm', 'rb') as f:
+        with open('data/spherical-gm2', 'rb') as f:
             best_matrices = pickle.load(f)
-        with open('data/spherical-mh', 'rb') as f:
+        with open('data/spherical-mh2', 'rb') as f:
             best_heights = pickle.load(f)
     except FileNotFoundError:
         print("No previous data found. Starting fresh.")
@@ -267,9 +288,9 @@ if __name__ == '__main__':
                     print(f"  SUCCESS! Evolutionary Strategy improved m-height to: {es_best_height:.4f}")
                     
                     try:
-                        with open('data/spherical-gm2', 'wb') as f:
+                        with open('data/spherical-gm4', 'wb') as f:
                             pickle.dump(best_matrices, f)
-                        with open('data/spherical-mh2', 'wb') as f:
+                        with open('data/spherical-mh4', 'wb') as f:
                             pickle.dump(best_heights, f)
                         print("  [Checkpoint automatically saved to disk]")
                     except Exception as e:
@@ -290,7 +311,7 @@ if __name__ == '__main__':
             break
 
         finally:
-            with open('data/spherical-gm2', 'wb') as f:
+            with open('data/spherical-gm4', 'wb') as f:
                 pickle.dump(best_matrices, f)
-            with open('data/spherical-mh2', 'wb') as f:
+            with open('data/spherical-mh4', 'wb') as f:
                 pickle.dump(best_heights, f)

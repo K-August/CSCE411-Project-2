@@ -229,9 +229,9 @@ if __name__ == '__main__':
 
     # Load existing data if available
     try:
-        with open('data/gm-BEST', 'rb') as f:
+        with open('data/gm-BEST-2', 'rb') as f:
             best_matrices = pickle.load(f)
-        with open('data/mh-BEST', 'rb') as f:
+        with open('data/mh-BEST-2', 'rb') as f:
             best_heights = pickle.load(f)
     except FileNotFoundError:
         print("No previous data found. Starting fresh.")
@@ -283,9 +283,9 @@ if __name__ == '__main__':
                     
                     # --- NEW FAILSAFE SAVE LOGIC ---
                     try:
-                        with open('data/genetic-gm', 'wb') as f:
+                        with open('data/genetic-gm-asda', 'wb') as f:
                             pickle.dump(best_matrices, f)
-                        with open('data/genetic-mh', 'wb') as f:
+                        with open('data/genetic-mh-asda', 'wb') as f:
                             pickle.dump(best_heights, f)
                         print("  [Checkpoint automatically saved to disk]")
                     except Exception as e:
@@ -307,7 +307,7 @@ if __name__ == '__main__':
             break
 
         finally:
-            with open('data/genetic-gm', 'wb') as f:
+            with open('data/genetic-gm-asda', 'wb') as f:
                 pickle.dump(best_matrices, f)
 
             with open('data/genetic-mh', 'wb') as f:
