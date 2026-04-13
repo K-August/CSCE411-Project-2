@@ -60,7 +60,6 @@ def main():
             checkpoint_end = time.perf_counter()
             print(f"Processed {count} cases... ({checkpoint_end - timer_start:.2f} seconds)")
             timer_start = time.perf_counter()
-            break
         # Unpack the specific inputs
         n, k, m, P = inputs[i]
         expected_h = expected_mHeights[i]

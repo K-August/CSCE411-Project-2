@@ -26,16 +26,28 @@ bool next_combination(std::vector<int>& comb, int n, int m) {
 bool is_spherically_spread(const MatrixXd& G, double threshold) {
     int cols = G.cols();
     for (int i = 0; i < cols; ++i) {
+        // Prevent division by zero if GA generates a zero-column
+        double norm_i = G.col(i).norm();
+        if (norm_i == 0.0) continue; 
+
         for (int j = i + 1; j < cols; ++j) {
-            double cos_sim = std::abs(G.col(i).dot(G.col(j))) / (G.col(i).norm() * G.col(j).norm());
+            double norm_j = G.col(j).norm();
+            if (norm_j == 0.0) continue;
+
+            double cos_sim = std::abs(G.col(i).dot(G.col(j))) / (norm_i * norm_j);
             if (cos_sim > threshold) return false;
         }
     }
     return true;
 }
 
-// Main Evaluator (P passed by const reference to stop Pybind11 memory duplication)
-double calc_mHeight_efficient(int n, int k, int m, const MatrixXd& P, double threshold) {
+// Main Evaluator
+// FIX 1: Use Eigen::Ref to safely borrow memory from Python without taking ownership
+double calc_mHeight_efficient(int n, int k, int m, const Eigen::Ref<const MatrixXd>& P, double threshold) {
+    
+    // Safety guard: If the genetic algorithm mutates into invalid bounds, reject safely.
+    if (m >= n || k > n || m <= 0) return 0.0;
+
     // G = [I | P]
     MatrixXd G(k, n);
     G.leftCols(k) = MatrixXd::Identity(k, k);
@@ -47,45 +59,42 @@ double calc_mHeight_efficient(int n, int k, int m, const MatrixXd& P, double thr
 
     double h_max = 0.0;
     
-    // Prepare initial combination S = [0, 1, ..., m-1]
     std::vector<int> S(m);
     for (int i = 0; i < m; ++i) S[i] = i;
 
-    // ==============================================================
-    // PERFORMANCE UPGRADE: Pre-allocate all memory outside the loop!
-    // ==============================================================
-    std::vector<int> S_bar;
-    S_bar.reserve(n - m);
-    std::vector<double> c(k);
-
-    HighsModel model;
-    model.lp_.num_col_ = k;
-    model.lp_.num_row_ = n - m;
-    model.lp_.sense_ = ObjSense::kMaximize; 
-    model.lp_.col_lower_.assign(k, -kHighsInf);
-    model.lp_.col_upper_.assign(k, kHighsInf);
-    model.lp_.row_lower_.assign(n - m, -1.0);
-    model.lp_.row_upper_.assign(n - m, 1.0);
-    model.lp_.col_cost_.assign(k, 0.0);
-
-    // Prepare Compressed Column format vectors
-    int num_nz_max = (n - m) * k;
-    model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
-    model.lp_.a_matrix_.start_.resize(k + 1, 0);
-    model.lp_.a_matrix_.index_.reserve(num_nz_max);
-    model.lp_.a_matrix_.value_.reserve(num_nz_max);
+    // FIX 2: Release Python GIL so your Genetic Algorithm can multi-thread this function!
+    py::gil_scoped_release release; 
 
     do {
-        // Fast clear (resets size to 0 without deleting the underlying memory capacity)
-        S_bar.clear(); 
+        std::vector<int> S_bar;
+        S_bar.reserve(n - m);
         for (int i = 0; i < n; ++i) {
             if (std::find(S.begin(), S.end(), i) == S.end()) {
                 S_bar.push_back(i);
             }
         }
         
-        model.lp_.a_matrix_.index_.clear();
-        model.lp_.a_matrix_.value_.clear();
+        // FIX 3: Localized scope. C++ automatically destroys and cleans up memory
+        // exactly at the end of the loop. 100% safe from double-free corruption.
+        Highs highs;
+        highs.setOptionValue("output_flag", false);
+        
+        HighsModel model;
+        model.lp_.num_col_ = k;
+        model.lp_.num_row_ = n - m;
+        model.lp_.sense_ = ObjSense::kMaximize; 
+        
+        model.lp_.col_lower_.assign(k, -kHighsInf);
+        model.lp_.col_upper_.assign(k, kHighsInf);
+
+        model.lp_.row_lower_.assign(n - m, -1.0);
+        model.lp_.row_upper_.assign(n - m, 1.0);
+
+        int num_nz = (n - m) * k;
+        model.lp_.a_matrix_.format_ = MatrixFormat::kColwise;
+        model.lp_.a_matrix_.start_.resize(k + 1, 0);
+        model.lp_.a_matrix_.index_.reserve(num_nz);
+        model.lp_.a_matrix_.value_.reserve(num_nz);
 
         for (int col = 0; col < k; ++col) {
             model.lp_.a_matrix_.start_[col] = model.lp_.a_matrix_.index_.size();
@@ -99,17 +108,11 @@ double calc_mHeight_efficient(int n, int k, int m, const MatrixXd& P, double thr
         }
         model.lp_.a_matrix_.start_[k] = model.lp_.a_matrix_.index_.size();
 
-        // ==============================================================
-        // INSTANTIATE HIGHS ENGINE INSIDE THE LOOP
-        // Because `model` is already pre-allocated, this is incredibly fast
-        // and 100% guarantees no solver memory corruption.
-        // ==============================================================
-        Highs highs;
-        highs.setOptionValue("output_flag", false); // Keep it silent!
+        model.lp_.col_cost_.assign(k, 0.0);
         highs.passModel(model);
 
-        // Solve for each vector in S
         for (int i : S) {
+            std::vector<double> c(k);
             for(int j = 0; j < k; ++j) {
                 c[j] = G(j, i);
             }
@@ -118,6 +121,7 @@ double calc_mHeight_efficient(int n, int k, int m, const MatrixXd& P, double thr
             highs.run();
             
             HighsModelStatus status = highs.getModelStatus();
+            
             if (status == HighsModelStatus::kOptimal) {
                 double z = highs.getInfo().objective_function_value;
                 if (z > h_max) h_max = z;
@@ -130,7 +134,6 @@ double calc_mHeight_efficient(int n, int k, int m, const MatrixXd& P, double thr
     return h_max;
 }
 
-// Pybind11 binding
 PYBIND11_MODULE(fast_evaluator, m) {
     m.def("calc_mHeight_efficient", &calc_mHeight_efficient, "Calculate mHeight with HiGHS");
 }
